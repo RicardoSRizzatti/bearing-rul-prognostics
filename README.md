@@ -1,22 +1,102 @@
-# Data Science Template
+# Prognóstico de vida útil remanescente de rolamentos
 
-Template para projetos de ciência de dados, da extração dos dados ao modelo servido num webapp: **ETL → treinamento (ONNX) → API FastAPI + front React**, tudo automatizado com `make` e empacotado em Docker.
+Estimar **quanto tempo um rolamento ainda vai funcionar antes de falhar** (RUL, *remaining useful life*) a partir de sinais de vibração, usando os ensaios acelerados até a falha da plataforma **PRONOSTIA** (FEMTO-ST), base do **IEEE PHM 2012 Prognostic Challenge**.
 
-O repositório já vem com um exemplo funcionando de ponta a ponta (classificação de espécies do dataset Iris). Ele serve de referência e deve ser substituído pelo seu problema.
+> 🚧 Projeto em andamento. O roteiro e o status de cada etapa estão na seção [Roteiro](#roteiro).
 
 ---
 
-## Sobre o projeto
+## Contexto
 
-> Preencha esta seção em cada projeto criado a partir do template. O texto abaixo descreve o exemplo.
+Rolamentos estão entre os componentes que mais falham em máquinas rotativas: motores, bombas, ventiladores, redutores. Detectar que um rolamento está com defeito já é útil, mas o que permite planejar a manutenção é saber **quanto tempo resta** até a falha: com essa estimativa dá para programar a troca para a próxima parada em vez de reagir a uma quebra.
+
+O instituto FEMTO-ST (Besançon, França) construiu a plataforma PRONOSTIA para degradar rolamentos de forma acelerada, sob carga radial elevada, e registrar a vibração do início do ensaio até a falha. Os defeitos não foram induzidos artificialmente: cada rolamento se degradou naturalmente, com falhas que envolvem esferas, pistas e gaiola. Esses ensaios foram a base do desafio de prognóstico da conferência IEEE PHM 2012 e hoje são um dos benchmarks mais usados em estimativa de RUL.
+
+## O desafio
+
+São 17 ensaios em três condições de operação:
+
+| Condição | Rotação | Carga radial | Aprendizado (até a falha) | Teste (interrompidos antes da falha) |
+|---|---|---|---|---|
+| 1 | 1800 rpm | 4000 N | Bearing1_1, Bearing1_2 | Bearing1_3 a Bearing1_7 |
+| 2 | 1650 rpm | 4200 N | Bearing2_1, Bearing2_2 | Bearing2_3 a Bearing2_7 |
+| 3 | 1500 rpm | 5000 N | Bearing3_1, Bearing3_2 | Bearing3_3 |
+
+Os 6 ensaios de aprendizado vão até a falha, definida como o instante em que a amplitude de vibração passa de 20 g. Os 11 ensaios de teste foram **truncados**: a tarefa é olhar o histórico disponível de cada um e estimar quanto tempo faltava, a partir do último registro, para ele atingir o critério de falha.
+
+O que torna o problema difícil:
+
+- **Pouquíssimos exemplos de falha**: apenas 6 rolamentos com histórico completo, 2 por condição.
+- **Grande variação de vida útil** entre rolamentos iguais na mesma condição, típica de degradação natural.
+- **Degradação não monotônica**: o sinal pode ficar estável por muito tempo e piorar de forma abrupta no fim.
+- **Três condições de operação**, com apenas um rolamento de teste na condição 3.
+- **Penalização assimétrica**: prever uma vida útil maior que a real (falha antes do previsto) custa mais caro que prever uma menor.
+
+## Objetivo e métrica
+
+**Objetivo:** estimar o RUL dos 11 rolamentos de teste no instante em que cada registro termina, maximizando o score oficial do desafio, e servir o modelo por uma API que recebe as features de um trecho de vibração e devolve a estimativa.
+
+**Métrica oficial (IEEE PHM 2012).** Para cada rolamento de teste *i*, calcula-se o erro percentual
+
+```
+Er_i = 100 × (RUL_real_i − RUL_previsto_i) / RUL_real_i
+```
+
+e o score individual
+
+```
+A_i = exp(−ln(0,5) · Er_i / 5)    se Er_i ≤ 0   (previsão atrasada: falha antes do previsto)
+A_i = exp(+ln(0,5) · Er_i / 20)   se Er_i > 0   (previsão antecipada)
+```
+
+O score final é a média dos `A_i` nos 11 rolamentos (1 = perfeito). Um erro de 5% para o lado atrasado já reduz o score do rolamento à metade; para o lado antecipado, isso só acontece com 20% de erro.
+
+Métricas complementares: erro absoluto médio do RUL nos rolamentos de teste e na validação deixando um rolamento de fora.
+
+## Dados
 
 | | |
 |---|---|
-| **Problema** | Classificar a espécie de uma flor (setosa, versicolor ou virginica) a partir de 4 medidas. |
-| **Dados** | Dataset Iris (150 amostras), carregado do scikit-learn em `etl/extract.py`. |
-| **Abordagem** | `StandardScaler` + `LogisticRegression`, exportados juntos em ONNX. |
-| **Métrica principal** | F1 macro no conjunto de teste (20%, estratificado). |
-| **Resultado** | Ver `models/metadata.json` ou a seção *Qualidade do modelo* no app. |
+| **Origem** | Plataforma PRONOSTIA, instituto FEMTO-ST — IEEE PHM 2012 Prognostic Challenge |
+| **Download oficial** | NASA Prognostics Center of Excellence — Data Set Repository, item *10. FEMTO Bearing*: <https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/> (arquivo direto: <https://phm-datasets.s3.amazonaws.com/NASA/10.+FEMTO+Bearing.zip>) |
+| **Espelho no GitHub** | <https://github.com/Lucky-Loek/ieee-phm-2012-data-challenge-dataset> (inclui os ensaios de teste completos, usados para conferir o RUL real) |
+| **Vibração** | 2 acelerômetros (horizontal e vertical) a 25,6 kHz; um trecho de 2560 amostras (0,1 s) a cada 10 s |
+| **Temperatura** | 10 Hz; 600 amostras por minuto |
+| **Formato** | CSV, um arquivo por trecho (`acc_xxxxx.csv`, `temp_xxxxx.csv`); cerca de 3 GB descompactado |
+| **RUL real do teste** | entre 339 s e 7570 s, conforme divulgado após o desafio |
+
+Os dados **não são versionados** neste repositório. Para baixá-los:
+
+```bash
+make data   # baixa o zip oficial e descompacta em data/raw/femto
+```
+
+Cada `acc_*.csv` traz hora, minuto, segundo, microssegundo, aceleração horizontal e aceleração vertical. Nem todos os arquivos usam o mesmo separador (há arquivos com `;`), então a leitura no `etl/extract.py` precisa detectá-lo.
+
+## Sobre o projeto
+
+| | |
+|---|---|
+| **Problema** | Estimar o RUL de rolamentos a partir de vibração, com poucos históricos completos até a falha. |
+| **Dados** | FEMTO-ST / PRONOSTIA (IEEE PHM 2012): 6 rolamentos de aprendizado e 11 de teste. |
+| **Abordagem (planejada)** | Features por trecho de 0,1 s (RMS, curtose, fator de crista, energia por banda de frequência e envelope), indicador de saúde suavizado, detecção do início da degradação e regressão do RUL. Validação deixando um rolamento de fora. |
+| **Métrica principal** | Score oficial do IEEE PHM 2012 (média de `A_i` nos 11 rolamentos de teste). |
+| **Resultado** | A preencher: ver `models/metadata.json` ou a seção *Qualidade do modelo* no app. |
+
+## Roteiro
+
+- [ ] Baixar os dados para `data/raw/femto` e adaptar `etl/extract.py` para ler os CSVs de vibração e temperatura
+- [ ] Análise exploratória em `notebooks/`: evolução do RMS e da curtose até a falha, espectros no início e no fim de cada ensaio
+- [ ] `etl/transform.py`: uma linha por trecho de 0,1 s com as features e o RUL de cada instante (aprendizado)
+- [ ] Baseline: regressão do RUL sobre as features no tempo, validada deixando um rolamento de fora
+- [ ] Indicador de saúde e detecção do início da degradação (antes dele, o RUL é pouco informativo)
+- [ ] Modelo final, exportado em ONNX, e score oficial nos 11 rolamentos de teste
+- [ ] Comparação com os resultados publicados para o desafio e análise dos erros por condição de operação
+
+## Referências
+
+- P. Nectoux *et al.*, "PRONOSTIA: An experimental platform for bearings accelerated degradation tests", *IEEE International Conference on Prognostics and Health Management*, Denver, 2012.
+- NASA PCoE Data Set Repository: <https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/>
 
 ---
 
@@ -173,18 +253,6 @@ Gráficos padronizados ficam em `app/frontend/src/charts/`:
 - `BarChart`, `LineChart` (com amostragem LTTB e zoom para séries longas) e `HeatmapChart`.
 
 Para um novo tipo de gráfico: registre-o em `charts/echarts.ts` e crie o componente em `charts/` usando `baseOption`, `valueAxis` e `categoryAxis` do tema.
-
----
-
-## Novo projeto a partir do template
-
-1. No GitHub: **Use this template → Create a new repository**.
-2. Preencha a seção *Sobre o projeto* deste README.
-3. Ajuste `configs/config.yaml`: nome do projeto, tabela, target e features.
-4. Substitua `extract()` pela sua fonte e as regras de `transform()`.
-5. Defina o modelo em `build_pipeline()` (`ml/train.py`).
-6. `make all`, confira as métricas, itere e comite `models/`.
-7. Apague os testes específicos do Iris em `tests/test_api.py` e `tests/test_etl.py` (ou adapte-os).
 
 ---
 

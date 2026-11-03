@@ -10,10 +10,11 @@ endif
 UV    ?= uv
 RUN   := $(UV) run
 FRONT := app/frontend
-IMAGE ?= datascience-template
+IMAGE ?= bearing-rul-prognostics
 PORT  ?= 8000
+FEMTO_URL := https://phm-datasets.s3.amazonaws.com/NASA/10.+FEMTO+Bearing.zip
 
-.PHONY: help setup setup-gcp front-install \
+.PHONY: help setup setup-gcp front-install data \
         extract transform load etl split fit evaluate train all \
         app front-dev front-build dev docker-build docker-run docker \
         test lint format check notebook clean clean-data
@@ -32,6 +33,13 @@ setup-gcp: ## Instala também o grupo gcp (BigQuery / Cloud Storage)
 
 front-install: ## Instala as dependências do front
 	cd $(FRONT) && npm ci
+
+# -------------------------------------------------------------------- dados
+data: ## Baixa os dados do FEMTO/PRONOSTIA (IEEE PHM 2012) em data/raw/femto
+	mkdir -p data/raw/femto
+	curl -fL "$(FEMTO_URL)" -o data/raw/femto.zip
+	unzip -n -q data/raw/femto.zip -d data/raw/femto
+	find data/raw/femto -name '*.zip' -exec unzip -n -q {} -d data/raw/femto \;
 
 # ---------------------------------------------------------------------- ETL
 extract: ## ETL: fonte → data/raw
